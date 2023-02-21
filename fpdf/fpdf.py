@@ -1333,7 +1333,179 @@ class FPDF(GraphicsStateMixin):
                 f"{-h * self.k:.2f} re {style.operator}"
             )
 
+    @check_page
+    def _draw_arc(
+        self,
+        x,
+        y,
+        a,
+        start_angle,
+        end_angle,
+        operator,
+        b=None,
+        inclination=0,
+        clockwise=False,
+        start_from_center=False,
+        end_at_center=False,
+    ):
+        """
+        Outputs an arc.
+        It can be drawn (border only), filled (with no border) or both.
+
+        Args:
+            a (float): Semi-major axis diameter.
+            b (float): Semi-minor axis diameter, if None, equals to a (default: None).
+            start_angle (float): Start angle of the arc (in degrees).
+            end_angle (float): End angle of the arc (in degrees).
+            inclination (float): Inclination of the arc in respect of the x-axis (default: 0).
+            clockwise (bool): Way of drawing the arc (True: clockwise, False: counterclockwise) (default: False).
+            start_from_center (bool): Start drawing from the center of the circle (default: False).
+            end_at_center (bool): End drawing at the center of the circle (default: False).
+            style (fpdf.enums.RenderStyle, str): Optional style of rendering. Allowed values are:
+
+            * `D` or None: draw border. This is the default value.
+            * `F`: fill
+            * `DF` or `FD`: draw and fill
+        """
+        if b is None:
+            b = a
+
+        a /= 2
+        b /= 2
+
+        cx = x + a
+        cy = y + b
+
+        # Functions used only to construct other points of the bezier curve
+        def deg_to_rad(deg):
+            return deg * math.pi / 180
+
+        def angle_to_param(angle):
+            angle = deg_to_rad(angle % 360)
+            eta = math.atan2(math.sin(angle) / b, math.cos(angle) / a)
+
+            if eta < 0:
+                eta += 2 * math.pi
+            return eta
+
+        theta = deg_to_rad(inclination)
+        cos_theta = math.cos(theta)
+        sin_theta = math.sin(theta)
+
+        def evaluate(eta):
+            a_cos_eta = a * math.cos(eta)
+            b_sin_eta = b * math.sin(eta)
+
+            return [
+                cx + a_cos_eta * cos_theta - b_sin_eta * sin_theta,
+                cy + a_cos_eta * sin_theta + b_sin_eta * cos_theta,
+            ]
+
+        def derivative_evaluate(eta):
+            a_sin_eta = a * math.sin(eta)
+            b_cos_eta = b * math.cos(eta)
+
+            return [
+                -a_sin_eta * cos_theta - b_cos_eta * sin_theta,
+                -a_sin_eta * sin_theta + b_cos_eta * cos_theta,
+            ]
+
+        # Calculating start_eta and end_eta so that
+        #   start_eta < end_eta   <= start_eta + 2*PI if counterclockwise
+        #   end_eta   < start_eta <= end_eta + 2*PI   if clockwise
+        start_eta = angle_to_param(start_angle)
+        end_eta = angle_to_param(end_angle)
+
+        if not clockwise and end_eta <= start_eta:
+            end_eta += 2 * math.pi
+        elif clockwise and end_eta >= start_eta:
+            start_eta += 2 * math.pi
+
+        start_point = evaluate(start_eta)
+
+        # Move to the start point
+        if start_from_center:
+            self._out(f"{cx * self.k:.2f} {(self.h - cy) * self.k:.2f} m")
+            self._out(
+                f"{start_point[0] * self.k:.2f} {(self.h - start_point[1]) * self.k:.2f} l"
+            )
+        else:
+            self._out(
+                f"{start_point[0] * self.k:.2f} {(self.h - start_point[1]) * self.k:.2f} m"
+            )
+
+        # Number of curves to use, maximal segment angle is 2*PI/max_curves
+        max_curves = 4
+        n = min(
+            max_curves, math.ceil(abs(end_eta - start_eta) / (2 * math.pi / max_curves))
+        )
+        d_eta = (end_eta - start_eta) / n
+
+        alpha = math.sin(d_eta) * (math.sqrt(4 + 3 * math.tan(d_eta / 2) ** 2) - 1) / 3
+
+        eta2 = start_eta
+        p2 = evaluate(eta2)
+        p2_prime = derivative_evaluate(eta2)
+
+        for i in range(n):
+            p1 = p2
+            p1_prime = p2_prime
+
+            eta2 += d_eta
+            p2 = evaluate(eta2)
+            p2_prime = derivative_evaluate(eta2)
+
+            control_point_1 = [p1[0] + alpha * p1_prime[0], p1[1] + alpha * p1_prime[1]]
+            control_point_2 = [p2[0] - alpha * p2_prime[0], p2[1] - alpha * p2_prime[1]]
+
+            end = ""
+            if i == n - 1 and not end_at_center:
+                end = f" {operator}"
+
+            self._out(
+                (
+                    f"{control_point_1[0] * self.k:.2f} {(self.h - control_point_1[1]) * self.k:.2f} "
+                    f"{control_point_2[0] * self.k:.2f} {(self.h - control_point_2[1]) * self.k:.2f} "
+                    f"{p2[0] * self.k:.2f} {(self.h - p2[1]) * self.k:.2f} c" + end
+                )
+            )
+
+        if end_at_center:
+            if start_from_center:
+                self._out(f"h {operator}")
+            else:
+                self._out(
+                    f"{cx * self.k:.2f} {(self.h - cy) * self.k:.2f} l {operator}"
+                )
+
+    @check_page
+    def rounded_rect(self, x, y, w, h, style, round_corners, r):
+        """
+        Outputs an rounded rect.
+        It can be drawn (border only), filled (with no border) or both.
+
+        Args:
+            x (float): Abscissa of upper-left bounding box.
+            y (float): Ordinate of upper-left bounding box.
+            w (float): Width
+            h (float): Height
+            style (fpdf.enums.RenderStyle, str): Optional style of rendering. Possible values are:
+
+            * `D` or empty string: draw border. This is the default value.
+            * `F`: fill
+            * `DF` or `FD`: draw and fill
+        """
+        style = RenderStyle.coerce(style)
+        self._draw_rounded_rect(x, y, w, h, style.operator, round_corners, r)
+
+
     def _draw_rounded_rect(self, x, y, w, h, style, round_corners, r):
+        if not style == "W h":
+            style = RenderStyle.coerce(style)
+            operator = style.operator
+        else:
+            operator = style
+
         min = h
         if w < h:
             min = w
@@ -1361,46 +1533,62 @@ class FPDF(GraphicsStateMixin):
         round_corners = tuple(Corner.coerce(rc) for rc in round_corners)
 
         if Corner.TOP_RIGHT in round_corners:
-            self.arc(coor_x[0], coor_y[0], 2 * r, 180, 270, style=style)
+            self._draw_arc(coor_x[0], coor_y[0], 2 * r, 180, 270, operator)
             point_1 = (x + r, y)
             point_8 = (x, y + r)
 
         if Corner.TOP_LEFT in round_corners:
-            self.arc(coor_x[1] - 2 * r, coor_y[1], 2 * r, 270, 0, style=style)
+            self._draw_arc(coor_x[1] - 2 * r, coor_y[1], 2 * r, 270, 0, operator)
             point_2 = (x + w - r, y)
             point_3 = (x + w, y + r)
 
         if Corner.BOTTOM_LEFT in round_corners:
-            self.arc(coor_x[3] - 2 * r, coor_y[3] - 2 * r, 2 * r, 0, 90, style=style)
+            self._draw_arc(coor_x[3] - 2 * r, coor_y[3] - 2 * r, 2 * r, 0, 90, operator)
             point_4 = (x + w, y + h - r)
             point_5 = (x + w - r, y + h)
 
         if Corner.BOTTOM_RIGHT in round_corners:
-            self.arc(coor_x[2], coor_y[2] - 2 * r, 2 * r, 90, 180, style=style)
+            self._draw_arc(coor_x[2], coor_y[2] - 2 * r, 2 * r, 90, 180, operator)
             point_6 = (x + r, y + h)
             point_7 = (x, y + h - r)
 
-        if style.is_fill:
-            self.polyline(
-                [
-                    point_1,
-                    point_2,
-                    point_3,
-                    point_4,
-                    point_5,
-                    point_6,
-                    point_7,
-                    point_8,
-                    point_1,
-                ],
-                style="F",
-            )
+        if not style == "W h":
+            if style.is_fill:
+                self.polyline(
+                    [
+                        point_1,
+                        point_2,
+                        point_3,
+                        point_4,
+                        point_5,
+                        point_6,
+                        point_7,
+                        point_8,
+                        point_1,
+                    ],
+                    style="F",
+                )
+            if style.is_draw:
+                self.line(point_1[0], point_1[1], point_2[0], point_2[1])
+                self.line(point_3[0], point_3[1], point_4[0], point_4[1])
+                self.line(point_5[0], point_5[1], point_6[0], point_6[1])
+                self.line(point_7[0], point_7[1], point_8[0], point_8[1])
+            return
 
-        if style.is_draw:
-            self.line(point_1[0], point_1[1], point_2[0], point_2[1])
-            self.line(point_3[0], point_3[1], point_4[0], point_4[1])
-            self.line(point_5[0], point_5[1], point_6[0], point_6[1])
-            self.line(point_7[0], point_7[1], point_8[0], point_8[1])
+        self.polyline(
+            [
+                point_1,
+                point_2,
+                point_3,
+                point_4,
+                point_5,
+                point_6,
+                point_7,
+                point_8,
+                point_1,
+            ],
+            style="F",
+        )
 
     @check_page
     def ellipse(self, x, y, w, h, style=None):
@@ -1581,117 +1769,20 @@ class FPDF(GraphicsStateMixin):
             * `DF` or `FD`: draw and fill
         """
         style = RenderStyle.coerce(style)
-
-        if b is None:
-            b = a
-
-        a /= 2
-        b /= 2
-
-        cx = x + a
-        cy = y + b
-
-        # Functions used only to construct other points of the bezier curve
-        def deg_to_rad(deg):
-            return deg * math.pi / 180
-
-        def angle_to_param(angle):
-            angle = deg_to_rad(angle % 360)
-            eta = math.atan2(math.sin(angle) / b, math.cos(angle) / a)
-
-            if eta < 0:
-                eta += 2 * math.pi
-            return eta
-
-        theta = deg_to_rad(inclination)
-        cos_theta = math.cos(theta)
-        sin_theta = math.sin(theta)
-
-        def evaluate(eta):
-            a_cos_eta = a * math.cos(eta)
-            b_sin_eta = b * math.sin(eta)
-
-            return [
-                cx + a_cos_eta * cos_theta - b_sin_eta * sin_theta,
-                cy + a_cos_eta * sin_theta + b_sin_eta * cos_theta,
-            ]
-
-        def derivative_evaluate(eta):
-            a_sin_eta = a * math.sin(eta)
-            b_cos_eta = b * math.cos(eta)
-
-            return [
-                -a_sin_eta * cos_theta - b_cos_eta * sin_theta,
-                -a_sin_eta * sin_theta + b_cos_eta * cos_theta,
-            ]
-
-        # Calculating start_eta and end_eta so that
-        #   start_eta < end_eta   <= start_eta + 2*PI if counterclockwise
-        #   end_eta   < start_eta <= end_eta + 2*PI   if clockwise
-        start_eta = angle_to_param(start_angle)
-        end_eta = angle_to_param(end_angle)
-
-        if not clockwise and end_eta <= start_eta:
-            end_eta += 2 * math.pi
-        elif clockwise and end_eta >= start_eta:
-            start_eta += 2 * math.pi
-
-        start_point = evaluate(start_eta)
-
-        # Move to the start point
-        if start_from_center:
-            self._out(f"{cx * self.k:.2f} {(self.h - cy) * self.k:.2f} m")
-            self._out(
-                f"{start_point[0] * self.k:.2f} {(self.h - start_point[1]) * self.k:.2f} l"
-            )
-        else:
-            self._out(
-                f"{start_point[0] * self.k:.2f} {(self.h - start_point[1]) * self.k:.2f} m"
-            )
-
-        # Number of curves to use, maximal segment angle is 2*PI/max_curves
-        max_curves = 4
-        n = min(
-            max_curves, math.ceil(abs(end_eta - start_eta) / (2 * math.pi / max_curves))
+        self._draw_arc(
+            x,
+            y,
+            a,
+            start_angle,
+            end_angle,
+            b=None,
+            inclination=0,
+            clockwise=False,
+            start_from_center=False,
+            end_at_center=False, 
+            operator=style.operator
         )
-        d_eta = (end_eta - start_eta) / n
 
-        alpha = math.sin(d_eta) * (math.sqrt(4 + 3 * math.tan(d_eta / 2) ** 2) - 1) / 3
-
-        eta2 = start_eta
-        p2 = evaluate(eta2)
-        p2_prime = derivative_evaluate(eta2)
-
-        for i in range(n):
-            p1 = p2
-            p1_prime = p2_prime
-
-            eta2 += d_eta
-            p2 = evaluate(eta2)
-            p2_prime = derivative_evaluate(eta2)
-
-            control_point_1 = [p1[0] + alpha * p1_prime[0], p1[1] + alpha * p1_prime[1]]
-            control_point_2 = [p2[0] - alpha * p2_prime[0], p2[1] - alpha * p2_prime[1]]
-
-            end = ""
-            if i == n - 1 and not end_at_center:
-                end = f" {style.operator}"
-
-            self._out(
-                (
-                    f"{control_point_1[0] * self.k:.2f} {(self.h - control_point_1[1]) * self.k:.2f} "
-                    f"{control_point_2[0] * self.k:.2f} {(self.h - control_point_2[1]) * self.k:.2f} "
-                    f"{p2[0] * self.k:.2f} {(self.h - p2[1]) * self.k:.2f} c" + end
-                )
-            )
-
-        if end_at_center:
-            if start_from_center:
-                self._out(f"h {style.operator}")
-            else:
-                self._out(
-                    f"{cx * self.k:.2f} {(self.h - cy) * self.k:.2f} l {style.operator}"
-                )
 
     def solid_arc(
         self,
@@ -4306,6 +4397,25 @@ class FPDF(GraphicsStateMixin):
                 f"{h * self.k:.2f} re W n"
             )
         )
+        yield
+        self._out("Q")
+
+    @check_page
+    @contextmanager
+    def rounded_rect_clip(self, x, y, w, h, r):
+        """
+        Context manager that defines an rounded rect crop zone,
+        useful to render only part of an image.
+
+        Args:
+            x (float): abscissa of the clipping region top left corner
+            y (float): ordinate of the clipping region top left corner
+            w (float): ellipse width
+            h (float): ellipse height
+            r (float): radius
+        """
+        self._out("q")
+        self._draw_rounded_rect(x,y,w,h,"W h",round_corners=True,r=r)
         yield
         self._out("Q")
 
