@@ -1575,6 +1575,7 @@ class FPDF(GraphicsStateMixin):
                 self.line(point_7[0], point_7[1], point_8[0], point_8[1])
             return
 
+        self.set_fill_color(r=255, g=255, b=255)
         self.polyline(
             [
                 point_1,
